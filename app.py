@@ -168,24 +168,46 @@ def pdf_to_excel():
 
 @app.post("/api/protect")
 def protect():
-    """Encrypt a PDF with a password via pikepdf (AES-256)."""
+    """Lock a PDF: optional open-password and/or editing & printing restrictions (pikepdf, AES-256)."""
     import pikepdf
+    import secrets
+
+    def _truthy(v):
+        return str(v).lower() in ("1", "true", "on", "yes")
 
     password = request.form.get("password", "")
-    if not password:
-        return _err("A password is required.")
+    restrict_edit = _truthy(request.form.get("restrict_edit", ""))
+    restrict_print = _truthy(request.form.get("restrict_print", ""))
+
+    if not password and not restrict_edit and not restrict_print:
+        return _err("Choose a password to open the file, or tick at least one restriction.")
+
     workdir = tempfile.mkdtemp(prefix="prot_")
     try:
         src, err = _save_upload(workdir, "input.pdf")
         if err:
             return err
-        out = os.path.join(workdir, "protected.pdf")
+        out = os.path.join(workdir, "locked.pdf")
+
+        perms = pikepdf.Permissions(
+            accessibility=True,
+            extract=not restrict_edit,
+            modify_annotation=not restrict_edit,
+            modify_assembly=not restrict_edit,
+            modify_form=not restrict_edit,
+            modify_other=not restrict_edit,
+            print_lowres=not restrict_print,
+            print_highres=not restrict_print,
+        )
+        # A random owner password enforces the restrictions so they can't be
+        # trivially removed. The user password (if any) is what opens the file.
+        owner = secrets.token_urlsafe(24)
         with pikepdf.open(src) as pdf:
             pdf.save(
                 out,
-                encryption=pikepdf.Encryption(owner=password, user=password, R=6),
+                encryption=pikepdf.Encryption(owner=owner, user=password, R=6, allow=perms),
             )
-        return _send_bytes(out, "protected.pdf", "application/pdf")
+        return _send_bytes(out, "locked.pdf", "application/pdf")
     except pikepdf._core.PasswordError:
         return _err("That PDF is already password-protected; unlock it first.", 400)
     finally:
